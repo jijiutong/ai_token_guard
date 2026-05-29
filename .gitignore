@@ -1,0 +1,56 @@
+# ============================
+# Dependencies
+# ============================
+node_modules/
+
+# ============================
+# Build Output
+# ============================
+dist/
+dist-zip/
+
+# ============================
+# Logs
+# ============================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ============================
+# Environment & Secrets
+# ============================
+.env
+.env.local
+.env.*.local
+
+# ============================
+# Editor & OS
+# ============================
+.DS_Store
+Thumbs.db
+*.suo
+*.user
+.idea/
+*.iml
+.claude/
+
+# ============================
+# Vite / TypeScript Cache
+# ============================
+*.tsbuildinfo
+.vite/
+
+# ============================
+# Optional: lock files
+# (keep package-lock.json for reproducible installs)
+# ============================
+# package-lock.json  # 推荐保留
+# yarn.lock          # 推荐保留
+
+# ============================
+# Docs (generated / local only)
+# ============================
+docs/

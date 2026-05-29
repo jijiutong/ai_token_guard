@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "AI Token Guard",
+  "version": "1.0.0",
+  "description": "国内大模型 Token 计数器 - 实时统计、上下文估算、Token 预警",
+  "default_locale": "zh_CN",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "permissions": [
+    "storage",
+    "notifications",
+    "activeTab",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "https://www.deepseek.com/*",
+    "https://yiyan.baidu.com/*",
+    "https://chat.baidu.com/*",
+    "https://tongyi.aliyun.com/*",
+    "https://qianwen.aliyun.com/*",
+    "https://www.doubao.com/*",
+    "https://doubao.com/*",
+    "https://platform.moonshot.cn/*",
+    "https://kimi.moonshot.cn/*",
+    "https://kimi.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "AI Token Guard"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "ai-token-guard",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "pinia": "^3.0.1",
+    "@dqbd/tiktoken": "^1.0.17",
+    "@vueuse/core": "^12.8.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.3",
+    "@crxjs/vite-plugin": "^2.0.0-beta.4",
+    "typescript": "~5.7.3",
+    "vite": "^6.2.4",
+    "vue-tsc": "^2.2.8",
+    "@types/chrome": "^0.0.306"
+  }
+}

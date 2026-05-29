@@ -1,0 +1,125 @@
+# AI Token Guard
+
+> 国内主流大模型网页端 Token 实时计数器 · Chrome Extension  
+> Real-time token counter for Chinese AI platforms · Chrome Extension
+
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/jijiutong/token-guard)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Manifest](https://img.shields.io/badge/Manifest-V3-orange.svg)](https://developer.chrome.com/docs/extensions/mv3/)
+
+---
+
+## 功能 · Features
+
+### 🇨🇳 中文
+
+- **实时输入计数** — 输入框内容实时显示 Token 数（仅展示，不累计）
+- **会话累计统计** — 仅在发送后累计输入，回复完成后累计输出
+- **上下文窗口估算** — `上下文≈` 基于历史消息 + 当前输入 + 平台基数 + 模板开销估算
+- **分平台今日统计** — Popup 中按平台展示输入/输出/总量，以及总览汇总
+- **简洁预警设置** — 支持总览阈值与平台阈值预警
+- **多会话隔离** — 按会话键隔离计数，切新会话时重置会话统计
+- **桌面宠物浮层** — 右下角可拖拽宠物 + 气泡信息展示
+
+### 🇺🇸 English
+
+- **Real-time input counting** — Shows token count while typing (display only, not accumulated)
+- **Session accumulation** — Input is counted on submit; output is counted on completed assistant reply
+- **Context window estimation** — `Context≈` is estimated from history + current input + base/system overhead
+- **Per-platform daily stats** — Popup shows overview plus per-platform input/output/total
+- **Simple quota alerts** — Supports global and per-platform token threshold alerts
+- **Per-conversation isolation** — Conversation counters reset on new conversation
+- **Desktop pet overlay** — Draggable pet and bubble status panel
+
+---
+
+## 支持平台 · Supported Platforms
+
+| 平台 Platform | 网址 URL | 上下文窗口 Context Window |
+|---|---|---|
+| DeepSeek | chat.deepseek.com | 128K tokens |
+| 文心一言 Yiyan | yiyan.baidu.com | 64K tokens |
+| 通义千问 Tongyi | tongyi.aliyun.com | 128K tokens |
+| 豆包 Doubao | www.doubao.com | 64K tokens |
+| Kimi (Moonshot) | platform.moonshot.cn | 2M tokens |
+
+---
+
+## 安装 · Installation
+
+### 从源码构建 · Build from Source
+
+**前置要求 Prerequisites:** Node.js 18+
+
+```bash
+# 1. 克隆仓库 Clone the repo
+git clone https://github.com/jijiutong/token-guard.git
+cd token-guard
+
+# 2. 安装依赖 Install dependencies
+npm install
+
+# 3. 构建扩展 Build the extension
+npm run build
+```
+
+构建产物在 `dist/` 目录。Build output will be in the `dist/` directory.
+
+### 加载到 Chrome · Load in Chrome
+
+1. 打开 `chrome://extensions/` · Open `chrome://extensions/`
+2. 开启右上角「开发者模式」· Enable **Developer mode** (top right)
+3. 点击「加载已解压的扩展程序」· Click **Load unpacked**
+4. 选择项目的 `dist/` 目录 · Select the `dist/` folder
+5. 访问任意支持平台，右下角会出现浮动计数栏 · Visit any supported platform — the floating bar appears at the bottom right
+
+---
+
+## 统计口径 · Counting Rules
+
+- **输入（实时）**：输入框当前文本的 token 估算，仅显示，不计入累计。
+- **输入（会话）**：仅在发送动作触发时累计。
+- **输出（会话）**：仅在识别到助手回复增量时累计。
+- **会话**：`会话 = 输入累计 + 输出累计`。
+- **上下文≈**：估算值，不等于会话，包含历史消息和模板开销。
+
+---
+
+## 界面预览 · UI Preview
+
+```
+┌──────────────────────────────────────┐
+│  输入 42 · 输出 180 · 会话 222 · 上下文≈ 3,891            │
+└──────────────────────────────────────┘
+          宠物浮层 · Pet overlay (bottom right, draggable)
+```
+
+Popup 页包含「统计」和「设置」两个标签页。  
+The popup has two tabs: **Stats** and **Settings**.
+
+---
+
+## 技术栈 · Tech Stack
+
+| 技术 | 用途 |
+|---|---|
+| Chrome MV3 | 扩展框架 |
+| Vue 3 + Pinia | Popup UI |
+| [@dqbd/tiktoken](https://github.com/dqbd/tiktoken) | WASM 分词引擎（cl100k_base） |
+| Offscreen API | 在 Service Worker 中运行 WASM |
+| Vite + CRXJS | 构建工具链 |
+| TypeScript | 全项目类型安全 |
+
+---
+
+## 隐私说明 · Privacy
+
+本扩展不收集、不上传任何用户数据。所有 Token 统计数据仅存储在本地 `chrome.storage.local`，不与任何服务器通信。
+
+This extension collects no user data. All token statistics are stored locally in `chrome.storage.local` and never transmitted to any server.
+
+---
+
+## License
+
+MIT

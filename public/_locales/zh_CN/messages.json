@@ -1,0 +1,4 @@
+{
+  "extension_name": { "message": "AI Token Guard" },
+  "extension_description": { "message": "国内大模型 Token 计数器" }
+}
