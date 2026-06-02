@@ -7,6 +7,7 @@ export class DomObserver {
   private onSubmitCallback: ((text: string) => void) | null = null
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private strategy: PlatformStrategy
+  private observing = false
 
   constructor(strategy: PlatformStrategy) {
     this.strategy = strategy
@@ -19,6 +20,7 @@ export class DomObserver {
   observeInput(onInput: (text: string) => void, onSubmit?: (text: string) => void): void {
     this.onInputCallback = onInput
     this.onSubmitCallback = onSubmit ?? null
+    if (this.observing) return
 
     const trySetup = (): boolean => {
       this.inputElement = this.findInputElement()
@@ -27,9 +29,11 @@ export class DomObserver {
       }
 
       this.bindInputElement(this.inputElement)
+      document.removeEventListener('click', this.handleDocumentClick, true)
       document.addEventListener('click', this.handleDocumentClick, true)
 
       // Set up MutationObserver to handle SPA re-renders
+      this.observer?.disconnect()
       this.observer = new MutationObserver(() => {
         if (!this.inputElement || !document.contains(this.inputElement)) {
           this.inputElement = this.findInputElement()
@@ -39,6 +43,7 @@ export class DomObserver {
         }
       })
       this.observer.observe(document.body, { childList: true, subtree: true })
+      this.observing = true
       return true
     }
 
@@ -143,5 +148,6 @@ export class DomObserver {
     document.removeEventListener('click', this.handleDocumentClick, true)
     this.observer = null
     this.inputElement = null
+    this.observing = false
   }
 }

@@ -62,7 +62,6 @@ async function initTokenizer(force = false) {
   }
 
   tokenizer.ready = true
-  console.log('[AI Token Guard Offscreen] Tokenizer initialized')
 }
 
 function countTokens(text: string, platform: PlatformName): number {
@@ -87,16 +86,13 @@ function cleanupEncoders(idleMs = 5 * 60 * 1000) {
 
 // Listen for messages from Service Worker
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  console.log('[AI Token Guard Offscreen] Received message:', message?.type)
   if (message.type === 'offscreen:ready_ping') {
     sendResponse({ ready: tokenizer.ready })
     return
   }
   if (message.type === 'offscreen:count_tokens') {
-    console.log('[AI Token Guard Offscreen] Counting tokens for text length:', message.data?.text?.length)
     handleCountTokens(message.data)
       .then((result) => {
-        console.log('[AI Token Guard Offscreen] Result:', result)
         sendResponse(result)
       })
       .catch((err) => {
@@ -109,7 +105,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function handleCountTokens(data: { text: string; platform: PlatformName }) {
   if (!tokenizer.ready) {
-    console.log('[AI Token Guard Offscreen] Initializing tokenizer on first use...')
     await initTokenizer()
   }
   try {
@@ -130,10 +125,6 @@ async function handleCountTokens(data: { text: string; platform: PlatformName })
 setInterval(cleanupEncoders, 5 * 60 * 1000)
 
 // Initialize on load
-initTokenizer().then(() => {
-  console.log('[AI Token Guard Offscreen] Tokenizer ready')
-}).catch((err) => {
+initTokenizer().catch((err) => {
   console.error('[AI Token Guard Offscreen] Tokenizer init failed:', err)
 })
-
-console.log('[AI Token Guard Offscreen] Loaded')

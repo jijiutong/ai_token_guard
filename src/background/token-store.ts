@@ -1,6 +1,7 @@
 import type { HourlyTokenUsage, SessionState, PlatformName, DailyStatsV2, Last24hStatsV2 } from '../shared/types'
 import { PLATFORMS } from '../shared/types'
 import { generateSessionId } from '../shared/utils'
+import { getLocalDayKey } from '../shared/day-key'
 
 const STORAGE_KEY = 'ai-token-guard:data'
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -52,13 +53,16 @@ export class TokenStore {
 
   getOrCreateSession(platform: PlatformName, conversationKey?: string): SessionState {
     const now = Date.now()
+    const dayKey = getLocalDayKey(now)
     for (const [id, state] of Object.entries(this.sessions)) {
       const sameConversation = conversationKey
         ? state.conversationKey === conversationKey
         : !state.conversationKey && now - state.lastActive < 5 * 60 * 1000
+      const sameDay = (state.dayKey || getLocalDayKey(state.lastActive)) === dayKey
 
-      if (state.platform === platform && sameConversation) {
+      if (state.platform === platform && sameConversation && sameDay) {
         state.lastActive = now
+        state.dayKey = dayKey
         this.save()
         return this.sessions[id]
       }
@@ -68,9 +72,12 @@ export class TokenStore {
 
   createSession(platform: PlatformName, conversationKey?: string): SessionState {
     const now = Date.now()
+    const dayKey = getLocalDayKey(now)
     for (const session of Object.values(this.sessions)) {
-      if (session.platform === platform && session.conversationKey === conversationKey) {
+      const sameDay = (session.dayKey || getLocalDayKey(session.lastActive)) === dayKey
+      if (session.platform === platform && session.conversationKey === conversationKey && sameDay) {
         session.lastActive = now
+        session.dayKey = dayKey
         this.save()
         return session
       }
@@ -81,6 +88,7 @@ export class TokenStore {
       sessionId,
       platform,
       conversationKey,
+      dayKey,
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
@@ -123,6 +131,43 @@ export class TokenStore {
     return session
   }
 
+  promoteSessionConversationKey(sessionId: string, conversationKey: string): SessionState | null {
+    const session = this.sessions[sessionId]
+    if (!session) return null
+    if (session.conversationKey === conversationKey) return session
+
+    const now = Date.now()
+    const dayKey = getLocalDayKey(now)
+    const existing = Object.values(this.sessions).find((candidate) => {
+      const sameDay = (candidate.dayKey || getLocalDayKey(candidate.lastActive)) === dayKey
+      return (
+        candidate.sessionId !== sessionId &&
+        candidate.platform === session.platform &&
+        candidate.conversationKey === conversationKey &&
+        sameDay
+      )
+    })
+
+    if (existing) {
+      existing.inputTokens += session.inputTokens
+      existing.outputTokens += session.outputTokens
+      existing.totalTokens += session.totalTokens
+      existing.contextWindowTokens = Math.max(existing.contextWindowTokens, session.contextWindowTokens)
+      existing.messageCount += session.messageCount
+      existing.lastActive = now
+      existing.dayKey = dayKey
+      delete this.sessions[sessionId]
+      this.save()
+      return existing
+    }
+
+    session.conversationKey = conversationKey
+    session.lastActive = now
+    session.dayKey = dayKey
+    this.save()
+    return session
+  }
+
   setContextWindow(sessionId: string, tokens: number) {
     const session = this.sessions[sessionId]
     if (!session) return
@@ -132,17 +177,17 @@ export class TokenStore {
   }
 
   getTodayStats(): { tokens: number } {
-    const today = new Date().toDateString()
+    const today = getLocalDayKey()
     const tokens = this.pruneEvents(this.usageEvents)
-      .filter((event) => new Date(event.timestamp).toDateString() === today)
+      .filter((event) => getLocalDayKey(event.timestamp) === today)
       .reduce((sum, event) => sum + event.totalTokens, 0)
     return { tokens }
   }
 
   getTodayStatsV2(): DailyStatsV2 {
-    const today = new Date().toDateString()
+    const today = getLocalDayKey()
     const events = this.pruneEvents(this.usageEvents)
-      .filter((event) => new Date(event.timestamp).toDateString() === today)
+      .filter((event) => getLocalDayKey(event.timestamp) === today)
     const byPlatform = this.initDailyStatsByPlatform()
     const overview = { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
 

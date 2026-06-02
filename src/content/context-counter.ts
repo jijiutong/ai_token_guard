@@ -58,6 +58,7 @@ export function buildAssistantText(messages: ConversationMessage[]): string {
 function isElementEligible(el: Element): boolean {
   const htmlEl = el as HTMLElement
   if (!htmlEl.isConnected) return false
+  if (htmlEl.id === 'ai-token-guard-bar' || htmlEl.closest('#ai-token-guard-bar')) return false
   if (htmlEl.closest('header, nav, aside, footer, button, [role="button"], [aria-hidden="true"]')) return false
   const style = window.getComputedStyle(htmlEl)
   if (style.display === 'none' || style.visibility === 'hidden') return false

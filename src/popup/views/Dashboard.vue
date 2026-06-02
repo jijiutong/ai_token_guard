@@ -33,7 +33,10 @@ async function clearAll() {
 <template>
   <div class="dashboard">
     <section class="today-stats">
-      <h2 class="section-title">今日统计</h2>
+      <div class="section-head">
+        <h2 class="section-title">今日统计</h2>
+        <span class="day-key">统计日 {{ store.todayDayKey }}</span>
+      </div>
       <div class="headline-panel">
         <div class="headline-main">
           <span class="stat-label">总量</span>
@@ -91,6 +94,11 @@ async function clearAll() {
 <style scoped>
 .dashboard { padding: 0; }
 .section-title { font-size: 13px; font-weight: 700; margin-bottom: 8px; color: #334155; }
+.day-key {
+  font-size: 11px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
 .headline-panel {
   display: grid;
   grid-template-columns: 1.5fr 1fr;

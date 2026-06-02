@@ -10,6 +10,7 @@ import type {
   QuotaConfig,
 } from '../../shared/types'
 import { PLATFORMS } from '../../shared/types'
+import { getLocalDayKey } from '../../shared/day-key'
 
 function emptyOverview(): DailyStatsOverview {
   return { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
@@ -33,6 +34,7 @@ function emptyHourlyByPlatform(): Record<PlatformName, HourlyTokenUsage[]> {
 
 export const useStatsStore = defineStore('stats', () => {
   const todayTokens = ref(0)
+  const todayDayKey = ref(getLocalDayKey())
   const last24hStats = ref<HourlyTokenUsage[]>([])
   const todayOverview = ref<DailyStatsOverview>(emptyOverview())
   const todayByPlatform = ref<Record<PlatformName, DailyStatsOverview>>(emptyOverviewByPlatform())
@@ -45,6 +47,7 @@ export const useStatsStore = defineStore('stats', () => {
   async function loadDailyStats() {
     loading.value = true
     try {
+      todayDayKey.value = getLocalDayKey()
       const response = await sendMessage({ type: 'get_daily_stats' })
       if (response?.type === 'daily_stats') {
         todayTokens.value = response.data.tokens
@@ -69,6 +72,7 @@ export const useStatsStore = defineStore('stats', () => {
   }
 
   async function loadDailyStatsV2() {
+    todayDayKey.value = getLocalDayKey()
     const response = await sendMessage({ type: 'get_daily_stats_v2' })
     if (response?.type === 'daily_stats_v2') {
       todayOverview.value = response.data.overview
@@ -98,7 +102,7 @@ export const useStatsStore = defineStore('stats', () => {
   }
 
   return {
-    todayTokens, last24hStats, quotaConfig, loading,
+    todayTokens, todayDayKey, last24hStats, quotaConfig, loading,
     todayOverview, todayByPlatform, last24hOverview, last24hByPlatform, selectedPlatform,
     loadDailyStats, loadLast24hStats, loadQuotaConfig, loadDailyStatsV2, loadLast24hStatsV2,
     clearPlatformStats, clearAllStats,

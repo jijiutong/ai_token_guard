@@ -65,6 +65,7 @@ export interface SessionState {
   sessionId: string
   platform: PlatformName
   conversationKey?: string
+  dayKey?: string
   inputTokens: number
   outputTokens: number
   totalTokens: number
@@ -106,6 +107,7 @@ export type MessageRequest =
   | { type: 'count_baseline_tokens'; platform: PlatformName; text: string; systemBase: number; templateOverhead: number; turnCount: number }
   | { type: 'get_session_id'; platform: PlatformName; conversationKey?: string }
   | { type: 'start_session'; platform: PlatformName; conversationKey: string }
+  | { type: 'promote_session'; platform: PlatformName; sessionId: string; conversationKey: string }
   | { type: 'get_daily_stats' }
   | { type: 'get_daily_stats_v2' }
   | { type: 'get_last24h_stats' }

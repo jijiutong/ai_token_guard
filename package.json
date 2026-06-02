@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:context": "node --experimental-strip-types --test tests/context-history.test.ts tests/output-delta.test.ts tests/output-cleanup.test.ts tests/day-key.test.ts tests/session-reset.test.ts",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },

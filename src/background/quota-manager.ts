@@ -1,5 +1,6 @@
 import type { QuotaConfig } from '../shared/types'
 import type { PlatformName } from '../shared/types'
+import { getLocalDayKey } from '../shared/day-key'
 
 const CONFIG_KEY = 'ai-token-guard:quota'
 
@@ -11,6 +12,7 @@ const DEFAULT_CONFIG: QuotaConfig = {
 export class QuotaManager {
   private config: QuotaConfig = { ...DEFAULT_CONFIG }
   private warned = { daily80: false, daily100: false }
+  private warnedDayKey = getLocalDayKey()
 
   async load() {
     try {
@@ -36,6 +38,11 @@ export class QuotaManager {
     todayTokens: number,
     byPlatform?: Record<PlatformName, { inputTokens: number; outputTokens: number; totalTokens: number }>
   ): 'ok' | 'warning' | 'critical' {
+    const currentDayKey = getLocalDayKey()
+    if (currentDayKey !== this.warnedDayKey) {
+      this.resetDailyWarnings()
+      this.warnedDayKey = currentDayKey
+    }
     let level: 'ok' | 'warning' | 'critical' = 'ok'
     let platformHit: PlatformName | null = null
 

@@ -18,7 +18,8 @@
 - **上下文窗口估算** — `上下文≈` 基于历史消息 + 当前输入 + 平台基数 + 模板开销估算
 - **分平台今日统计** — Popup 中按平台展示输入/输出/总量，以及总览汇总
 - **简洁预警设置** — 支持总览阈值与平台阈值预警
-- **多会话隔离** — 按会话键隔离计数，切新会话时重置会话统计
+- **多会话隔离** — 按真实会话 ID 隔离计数，当天切换历史会话会恢复统计
+- **新话题识别** — 真正新开的空白会话显示输入 0 / 输出 0 / 会话 0
 - **桌面宠物浮层** — 右下角可拖拽宠物 + 气泡信息展示
 
 ### 🇺🇸 English
@@ -28,7 +29,8 @@
 - **Context window estimation** — `Context≈` is estimated from history + current input + base/system overhead
 - **Per-platform daily stats** — Popup shows overview plus per-platform input/output/total
 - **Simple quota alerts** — Supports global and per-platform token threshold alerts
-- **Per-conversation isolation** — Conversation counters reset on new conversation
+- **Per-conversation isolation** — Counters are keyed by real conversation IDs and restored when switching history today
+- **New-topic detection** — A truly blank new topic starts from input 0 / output 0 / session 0
 - **Desktop pet overlay** — Draggable pet and bubble status panel
 
 ---
@@ -81,7 +83,18 @@ npm run build
 - **输入（会话）**：仅在发送动作触发时累计。
 - **输出（会话）**：仅在识别到助手回复增量时累计。
 - **会话**：`会话 = 输入累计 + 输出累计`。
-- **上下文≈**：估算值，不等于会话，包含历史消息和模板开销。
+- **上下文≈**：实时估算值，不等于会话，包含历史消息、当前输入和模板开销。
+- **历史会话**：同一天内切换历史会话会恢复该会话的输入/输出/会话累计。
+- **新开会话**：没有真实会话 ID 的空白新话题从 0 开始。
+- **跨天重置**：跨本地自然日后，历史会话的输入/输出/会话累计重新开始；上下文仍按页面内容实时估算。
+
+English summary:
+
+- Live input tokens are display-only until the message is submitted.
+- Session input is accumulated on submit; output is accumulated when an assistant reply delta is detected.
+- Today’s history conversations restore their own input/output/session totals by conversation ID.
+- A blank new topic starts from zero.
+- After the local day changes, session totals start fresh while context is still estimated from the visible page.
 
 ---
 
@@ -109,6 +122,42 @@ The popup has two tabs: **Stats** and **Settings**.
 | Offscreen API | 在 Service Worker 中运行 WASM |
 | Vite + CRXJS | 构建工具链 |
 | TypeScript | 全项目类型安全 |
+
+---
+
+## 开发 · Development
+
+```bash
+npm install
+npm run test:context
+npm run build
+```
+
+常用说明：
+
+- `npm run test:context` 覆盖上下文恢复、输出去重、会话 key、新话题重置等核心逻辑。
+- `npm run build` 会先执行 `vue-tsc --noEmit`，再生成 Chrome 扩展产物。
+- 构建后的扩展目录是 `dist/`。
+
+### 日志 · Logging
+
+默认只保留基础日志：安装提示、运行时错误、WASM 重试警告、offscreen 初始化失败等。高频调试日志默认关闭。
+
+如需临时排查某个平台，在对应 AI 网页控制台执行：
+
+```js
+localStorage.setItem('ai-token-guard-debug', '1')
+location.reload()
+```
+
+关闭调试日志：
+
+```js
+localStorage.removeItem('ai-token-guard-debug')
+location.reload()
+```
+
+调试模式会输出平台状态、输入/输出提交、上下文采样和输出抓取路径等信息。
 
 ---
 

@@ -4,6 +4,7 @@ import type { MessageRequest, MessageResponse, PlatformName } from '../shared/ty
 
 const store = new TokenStore()
 const quotaManager = new QuotaManager()
+let initPromise: Promise<void> | null = null
 
 // Offscreen document URL
 const OFFSCREEN_URL = chrome.runtime.getURL('src/offscreen/index.html')
@@ -29,8 +30,8 @@ async function broadcastStatsCleared(scope: 'platform' | 'all', platform?: Platf
 async function createOffscreenDocument() {
   if (offscreenReady) return
   if (offscreenCreating) {
-    while (!offscreenReady) await new Promise(r => setTimeout(r, 100))
-    return
+    while (offscreenCreating && !offscreenReady) await new Promise(r => setTimeout(r, 100))
+    if (offscreenReady) return
   }
 
   offscreenCreating = true
@@ -40,12 +41,9 @@ async function createOffscreenDocument() {
       reasons: ['LOCAL_STORAGE'],
       justification: 'Token counting via tiktoken WASM',
     })
-    console.log('[AI Token Guard] Offscreen created, waiting for WASM...')
   } catch (err) {
-    const msg = (err as Error).message
-    if (msg.includes('Only a single offscreen')) {
-      console.log('[AI Token Guard] Offscreen already exists')
-    } else {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (!msg.includes('Only a single offscreen')) {
       console.error('[AI Token Guard] Failed to create offscreen:', err)
       offscreenCreating = false
       return
@@ -59,7 +57,6 @@ async function createOffscreenDocument() {
       })
       if (result) {
         offscreenReady = true
-        console.log('[AI Token Guard] Offscreen ready')
         break
       }
     } catch { /* ignore */ }
@@ -86,16 +83,34 @@ async function offscreenCountTokens(text: string, platform: PlatformName): Promi
   })
 }
 
+async function ensureInitialized() {
+  if (initPromise) return initPromise
+  initPromise = (async () => {
+    await store.load()
+    await quotaManager.load()
+  })()
+  try {
+    await initPromise
+  } catch (error) {
+    initPromise = null
+    throw error
+  }
+}
+
 chrome.runtime.onMessage.addListener(
   (request: MessageRequest, _sender: chrome.runtime.MessageSender, sendResponse: (response: MessageResponse) => void) => {
-    handleRequest(request).then(sendResponse)
+    handleRequest(request)
+      .then(sendResponse)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        sendResponse({ type: 'error', message })
+      })
     return true
   }
 )
 
 async function handleRequest(request: MessageRequest): Promise<MessageResponse> {
-  await store.load()
-  await quotaManager.load()
+  await ensureInitialized()
 
   switch (request.type) {
     case 'count_tokens': {
@@ -140,6 +155,12 @@ async function handleRequest(request: MessageRequest): Promise<MessageResponse> 
     }
     case 'start_session': {
       const session = store.getOrCreateSession(request.platform, request.conversationKey)
+      return { type: 'session_id', data: { sessionId: session.sessionId, session } }
+    }
+    case 'promote_session': {
+      const session = store.promoteSessionConversationKey(request.sessionId, request.conversationKey)
+      if (!session) return { type: 'error', message: 'Session not found' }
+      await store.save()
       return { type: 'session_id', data: { sessionId: session.sessionId, session } }
     }
     case 'get_daily_stats':

@@ -2,15 +2,27 @@ import { isTargetPlatform } from './platform-detector'
 import { DomObserver } from './dom-observer'
 import { FloatingBar } from './floating-bar'
 import { buildAssistantText, buildContextText, collectAssistantTexts, collectConversationMessages } from './context-counter'
+import { mergeContextHistorySample, restoreContextHistoryFromWindow, type ContextHistoryState } from './context-history'
+import { createOutputSignature, getAppendOnlyDelta, getTailWindowDelta, hashString } from './output-delta'
+import {
+  stripLeadingUserEcho,
+  stripAtgStatsEchoText,
+  shouldAllowAwaitingResetNoDelta,
+  shouldAttemptOutputSelfHeal,
+} from './output-cleanup'
+import {
+  hasResolvedSessionKey,
+  resolveConversationKeyForState,
+  shouldCheckEmptyConversationReset,
+} from './session-reset'
 import { debounce } from '../shared/utils'
+import { getLocalDayKey } from '../shared/day-key'
 import type { MessageRequest, MessageResponse, TokenCount, PlatformName, SessionState } from '../shared/types'
 import { getStrategyByHostname } from './platform-strategy'
 
 export {}
 
 const hostname = window.location.hostname
-console.log(`[AI Token Guard] Content script loaded on ${hostname}`)
-console.log('[AI Token Guard] Script URL:', import.meta.url)
 
 /** System prompt base tokens per platform */
 const SYSTEM_PROMPT_BASE: Record<PlatformName, number> = {
@@ -23,14 +35,15 @@ const SYSTEM_PROMPT_BASE: Record<PlatformName, number> = {
 
 const CHAT_TEMPLATE_OVERHEAD = 5
 
-if (!isTargetPlatform()) {
-  console.log(`[AI Token Guard] Not a target platform (${hostname}), skipping.`)
-} else {
+if (isTargetPlatform()) {
   main()
 }
 
 function main() {
   let currentPlatform: PlatformName | 'unknown' = 'unknown'
+  const TRACE_TAG = '[ATG-TRACE]'
+  const traceState = new Map<string, { sig: string; at: number }>()
+  const traceThrottleState = new Map<string, number>()
   const publishBridgeState = (state: Record<string, unknown>) => {
     ;(window as unknown as { __ATG_State?: Record<string, unknown> }).__ATG_State = state
     ;(window as unknown as { __ATG_DoubaoState?: Record<string, unknown> }).__ATG_DoubaoState = state
@@ -66,7 +79,41 @@ function main() {
     console.log('[AI Token Guard][platform-debug]', platform, ...args)
   }
 
-  console.log(`[AI Token Guard] Activated on ${platform}`)
+  function trace(type: string, data: Record<string, unknown> = {}) {
+    if (!debugOutput) return
+    const payload = {
+      type,
+      ts: Date.now(),
+      platform,
+      convKey: getConversationKey(),
+      input: committedInputTokens,
+      output: committedOutputTokens,
+      session: committedInputTokens + committedOutputTokens,
+      context: contextWindowTokens,
+      ...data,
+    }
+    const key = `${type}:${payload.convKey}`
+    if (type === 'context_ignored_shrink') {
+      const throttleKey = `${key}:throttle`
+      const lastAt = traceThrottleState.get(throttleKey) || 0
+      if (Date.now() - lastAt < 10000) return
+      traceThrottleState.set(throttleKey, Date.now())
+    }
+    const sig = JSON.stringify({
+      type: payload.type,
+      platform: payload.platform,
+      convKey: payload.convKey,
+      input: payload.input,
+      output: payload.output,
+      context: payload.context,
+      data,
+    })
+    const now = Date.now()
+    const prev = traceState.get(key)
+    if (prev && prev.sig === sig && now - prev.at < 15000) return
+    traceState.set(key, { sig, at: now })
+    console.log(TRACE_TAG, payload)
+  }
 
   const domObserver = new DomObserver(strategy)
   const floatingBar = new FloatingBar()
@@ -90,10 +137,17 @@ function main() {
   let assistantBaselineList: string[] = []
   let assistantLastSeenText = ''
   let assistantLastChangedAt = 0
+  let noDeltaPolls = 0
+  let stableIdleAssistantTicks = 0
+  let lastIdleAssistantText = ''
+  let trustedAssistantBaselineText = ''
+  let trustedAssistantBaselineList: string[] = []
+  let trustedReplyBaselineRaw = ''
   let replyStartAssistantCount = 0
   let replyBaselineAssistantRaw = ''
   let assistantFallbackLastSeenRaw = ''
   let lastCommittedInputText = ''
+  const recentCommittedInputs: string[] = []
   let lastInputCommittedAt = 0
   let lastOutputCountedAt = 0
   let lastSelfHealAttemptAt = 0
@@ -102,16 +156,26 @@ function main() {
   const recentInputCommitKeys = new Map<string, number>()
   let awaitingStartedAt = 0
   const countedOutputSignatures = new Set<string>()
+  const pendingOutputSignatures = new Set<string>()
+  let outputCountInFlight = false
   const platformEventLog: Array<{ at: number; type: string; data?: Record<string, unknown> }> = []
   let contextWindowTokens = SYSTEM_PROMPT_BASE[platform]
   let contextHistoryTokens = 0
   let contextHistoryTurns = 0
   let contextVersion = 0
   let lastContextFingerprint = ''
+  let shrinkStableCount = 0
+  let lastShrinkSampleTokens = 0
+  let shrinkReportFingerprint = ''
+  let shrinkReportCount = 0
+  let shrinkReportLastAt = 0
   let commitInFlight = false
   let draftConversationNonce = 0
   let conversationKeyLocked = ''
   let lastForcedDraftResetAt = 0
+  let hasMountedOnce = false
+  let emptyConversationResetCount = 0
+  let currentDayKey = getLocalDayKey()
 
   function hasConversationMessages(): boolean {
     const assistantBlocks = strategy.findAssistantBlocks()
@@ -159,34 +223,31 @@ function main() {
   }
 
   function hasResolvedSessionId(baseKey: string): boolean {
-    return baseKey.startsWith(`${platform}:`) || baseKey.startsWith('ds:')
+    return hasResolvedSessionKey(platform, baseKey)
   }
 
-  function resolveConversationKey(): string {
-    const baseKey = strategy.sessionKeyResolver(
+  function isDraftConversationKey(key: string): boolean {
+    return key.includes(':draft:')
+  }
+
+  function currentBaseConversationKey(): string {
+    return strategy.sessionKeyResolver(
       window.location.hostname,
       window.location.pathname,
       window.location.search,
       window.location.hash
     )
-    if (platform === 'yiyan' && !hasResolvedSessionId(baseKey)) {
-      // Yiyan homepage/new topic route should always start from a clean draft session.
-      return `yiyan:draft:${Date.now()}:${draftConversationNonce}`
-    }
-    if (platform === 'deepseek' && !hasResolvedSessionId(baseKey)) {
-      // DeepSeek homepage (/ with no sid) must always be treated as a fresh draft
-      // to avoid reviving historical counters.
-      return `deepseek:draft:${Date.now()}:${draftConversationNonce}`
-    }
-    if (platform === 'moonshot' && !hasResolvedSessionId(baseKey)) {
-      // Kimi homepage/new topic route should always start from a clean draft session.
-      return `moonshot:draft:${Date.now()}:${draftConversationNonce}`
-    }
-    const empty = !hasConversationMessages()
-    if (empty) {
-      return `${baseKey}::draft:${Date.now()}:${draftConversationNonce}`
-    }
-    return baseKey
+  }
+
+  function resolveConversationKey(): string {
+    const baseKey = currentBaseConversationKey()
+    return resolveConversationKeyForState({
+      platform,
+      baseKey,
+      hasConversationMessages: hasConversationMessages(),
+      now: Date.now(),
+      draftConversationNonce,
+    })
   }
 
   function publishPlatformState(extra: Record<string, unknown> = {}) {
@@ -261,12 +322,61 @@ function main() {
   }
 
   function hashText(input: string): string {
-    let hash = 2166136261
-    for (let i = 0; i < input.length; i += 1) {
-      hash ^= input.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return (hash >>> 0).toString(36)
+    return hashString(input)
+  }
+
+  function bumpContextHistoryFromCommit(tokenDelta: number, turnDelta: number) {
+    if (tokenDelta <= 0 && turnDelta <= 0) return
+    applyTrustedContextHistory({
+      tokens: Math.max(0, contextHistoryTokens + Math.max(0, tokenDelta)),
+      turns: Math.max(0, contextHistoryTurns + Math.max(0, turnDelta)),
+      fingerprint: lastContextFingerprint,
+    })
+  }
+
+  function stripUserEchoFromDelta(delta: string): string {
+    const candidates = [
+      normalizeMessageText(lastCommittedInputText || ''),
+      normalizeMessageText(lastNonEmptyInputText || ''),
+      ...recentCommittedInputs.map((text) => normalizeMessageText(text)),
+    ]
+    return stripLeadingUserEcho(delta, candidates, 3)
+  }
+
+  function stripAtgStatsEcho(text: string): string {
+    return stripAtgStatsEchoText(text)
+  }
+
+  function sanitizeReplyCandidate(text: string): string {
+    const noUserEcho = stripUserEchoFromDelta(text)
+    const noStatsEcho = stripAtgStatsEcho(noUserEcho)
+    return noStatsEcho.trim()
+  }
+
+  function normalizeFallbackDelta(delta: string, baselineRaw: string, currentRaw: string): string {
+    const clean = delta.trim()
+    if (!clean) return ''
+    const tooLarge = (
+      clean.length > 1200 ||
+      clean.length > currentRaw.length * 0.7 ||
+      (baselineRaw.length > 0 && clean.length > baselineRaw.length * 0.8)
+    )
+    if (!tooLarge) return clean
+
+    const tail = getTailWindowDelta(baselineRaw, currentRaw, 24)
+    if (tail) return tail
+
+    // Last-resort conservative clip to avoid counting a whole rewritten history block.
+    return clean.slice(-240).trim()
+  }
+
+  function isSuspiciousFallbackDelta(delta: string, baselineRaw: string, assistantRaw: string): boolean {
+    const cleanLen = delta.trim().length
+    if (!cleanLen) return true
+    if (cleanLen >= 5000) return true
+    if (baselineRaw && cleanLen > Math.max(1200, Math.floor(baselineRaw.length * 0.65))) return true
+    if (assistantRaw && cleanLen > Math.max(1600, Math.floor(assistantRaw.length * 0.75))) return true
+    return false
   }
 
   function markInputCommittedOnce(conversationKey: string, text: string): boolean {
@@ -291,8 +401,7 @@ function main() {
     if (!matched) return false
     draftConversationNonce += 1
     conversationKeyLocked = ''
-    resetConversation()
-    ensureSession()
+    resetConversation(true, false, false)
     updateDisplay()
     sendResponse?.({ ok: true })
     return true
@@ -475,17 +584,30 @@ function main() {
 
     if (!currentText) return
 
+    if (!awaitingAssistantReply) {
+      if (currentText === lastIdleAssistantText) {
+        stableIdleAssistantTicks += 1
+      } else {
+        lastIdleAssistantText = currentText
+        stableIdleAssistantTicks = 0
+      }
+      if (stableIdleAssistantTicks >= 2) {
+        trustedAssistantBaselineText = currentText
+        trustedAssistantBaselineList = assistantTexts.slice()
+        trustedReplyBaselineRaw = getReplyBaselineAssistantRaw()
+      }
+    }
+
     if (currentText !== assistantLastSeenText) {
       assistantLastSeenText = currentText
       assistantLastChangedAt = now
+      noDeltaPolls = 0
       return
     }
 
     if (!awaitingAssistantReply || outputCountedForCurrentReply) return
     if (awaitingStartedAt > 0 && now - awaitingStartedAt > 30000) {
-      awaitingAssistantReply = false
-      outputCountedForCurrentReply = false
-      publishPlatformState({ reason: 'awaiting_timeout_reset' })
+      void maybeForceCommitAssistantOnTimeout(currentText)
       return
     }
     if (now - assistantLastChangedAt < 2500) return
@@ -498,10 +620,10 @@ function main() {
         if (!baselineLatest) {
           delta = convAssistant
         } else if (convAssistant !== baselineLatest) {
-          const overlap = longestCommonPrefixLen(baselineLatest, convAssistant)
-          delta = overlap > 0 && overlap < convAssistant.length
-            ? convAssistant.slice(overlap).trim()
-            : convAssistant
+          delta = getAppendOnlyDelta(baselineLatest, convAssistant)
+          if (!delta && platform === 'doubao') {
+            delta = getTailWindowDelta(baselineLatest, convAssistant)
+          }
         }
       }
     }
@@ -514,23 +636,38 @@ function main() {
       currCount: assistantTexts.length,
       replyStartAssistantCount,
     })
-    if (!delta) return
-
-    const signature = `a:${replyStartAssistantCount}:${delta.length}:${hashText(delta)}`
-    if (countedOutputSignatures.has(signature)) {
-      return
+    if (!delta) {
+      const changedLatest = getChangedLatestAssistantText(assistantBaselineList, assistantTexts)
+      if (!changedLatest) {
+        noDeltaPolls += 1
+        return
+      }
+      delta = changedLatest
     }
-    countedOutputSignatures.add(signature)
-    outputCountedForCurrentReply = true
-    awaitingAssistantReply = false
-    assistantBaselineText = currentText
-    assistantBaselineList = assistantTexts
-    lastOutputCountedAt = Date.now()
-    publishPlatformState({ reason: 'assistant_delta', deltaLen: delta.length })
-    countOutputTokens(delta)
+    noDeltaPolls = 0
+    const normalizedDelta = normalizeFallbackDelta(delta, assistantBaselineText, currentText)
+    let sanitizedDelta = sanitizeReplyCandidate(normalizedDelta)
+    if (!sanitizedDelta && committedOutputTokens === 0) {
+      const latestAssistant = getLatestAssistantTextFromConversation()
+      sanitizedDelta = sanitizeReplyCandidate(latestAssistant)
+    }
+    if (!sanitizedDelta) return
+
+    void countOutputDelta('assistant_delta', sanitizedDelta, () => {
+      outputCountedForCurrentReply = true
+      awaitingAssistantReply = false
+      assistantBaselineText = currentText
+      assistantBaselineList = assistantTexts
+      trustedAssistantBaselineText = assistantBaselineText
+      trustedAssistantBaselineList = assistantBaselineList.slice()
+      trustedReplyBaselineRaw = getReplyBaselineAssistantRaw()
+      lastOutputCountedAt = Date.now()
+      publishPlatformState({ reason: 'assistant_delta', deltaLen: delta.length })
+    })
   }
 
   function maybeCountOutputByConversationFallback() {
+    if (outputCountInFlight) return
     if (outputCountedForCurrentReply) return
     const now = Date.now()
     const waitingForReply = awaitingAssistantReply
@@ -550,10 +687,18 @@ function main() {
       }
     }
     if (!assistantRaw) {
-      if (platform === 'yiyan' && waitingForReply && awaitingStartedAt > 0 && now - awaitingStartedAt > 10000) {
-        awaitingAssistantReply = false
-        outputCountedForCurrentReply = false
-        publishPlatformState({ reason: 'assistant_fallback_empty_timeout' })
+      if ((platform === 'yiyan' || platform === 'moonshot') && waitingForReply && awaitingStartedAt > 0 && now - awaitingStartedAt > 10000) {
+        const awaitingMs = now - awaitingStartedAt
+        const stableMs = now - assistantLastChangedAt
+        if (shouldAllowAwaitingResetNoDelta({
+          awaitingMs,
+          stableMs,
+          consecutiveNoDeltaPolls: noDeltaPolls,
+        })) {
+          awaitingAssistantReply = false
+          outputCountedForCurrentReply = false
+          publishPlatformState({ reason: 'assistant_fallback_empty_timeout' })
+        }
       }
       return
     }
@@ -561,45 +706,117 @@ function main() {
       assistantFallbackLastSeenRaw = assistantRaw
       assistantLastChangedAt = now
     }
+    if (waitingForReply && now - assistantLastChangedAt < 2200) return
     let delta = ''
     if (!replyBaselineAssistantRaw) {
       // First assistant reply in a fresh window/session: baseline may be empty.
       delta = assistantRaw.trim()
     } else {
-      if (assistantRaw.startsWith(replyBaselineAssistantRaw)) {
-        delta = assistantRaw.slice(replyBaselineAssistantRaw.length).trim()
-      } else if (awaitingStartedAt > 0 && now - awaitingStartedAt > 7000) {
-        // Safety valve for layouts that rewrite whole assistant block instead
-        // of appending, which breaks strict prefix-based diff.
-        delta = assistantRaw.trim()
-      } else {
+      delta = getAppendOnlyDelta(replyBaselineAssistantRaw, assistantRaw)
+      if (!delta && platform === 'doubao') {
+        delta = getTailWindowDelta(replyBaselineAssistantRaw, assistantRaw)
+      }
+      if (!delta) {
+        const latestAssistant = getLatestAssistantTextFromConversation() || ''
+        const baselineLatest = assistantBaselineList[assistantBaselineList.length - 1]?.trim() || ''
+        const waitedLongEnough = waitingForReply && awaitingStartedAt > 0 && now - awaitingStartedAt > 2500
+        if (latestAssistant && latestAssistant !== baselineLatest && waitedLongEnough) {
+          const sanitizedLatestReply = sanitizeReplyCandidate(latestAssistant)
+          if (sanitizedLatestReply) {
+            dbg('fallback-latest-assistant-full', {
+              textLen: sanitizedLatestReply.length,
+              sample: sanitizedLatestReply.slice(0, 60),
+            })
+            void countOutputDelta('conversation_fallback_latest_reply', sanitizedLatestReply, () => {
+              outputCountedForCurrentReply = true
+              awaitingAssistantReply = false
+              replyBaselineAssistantRaw = assistantRaw
+              assistantFallbackLastSeenRaw = assistantRaw
+              assistantBaselineText = getAssistantText()
+              assistantBaselineList = collectAssistantTexts(strategy.findAssistantBlocks())
+              trustedAssistantBaselineText = assistantBaselineText
+              trustedAssistantBaselineList = assistantBaselineList.slice()
+              trustedReplyBaselineRaw = replyBaselineAssistantRaw
+              lastOutputCountedAt = Date.now()
+              publishPlatformState({ reason: 'conversation_fallback_latest_reply', deltaLen: sanitizedLatestReply.length })
+            })
+            return
+          }
+        }
+        const changedThisReply = assistantRaw.trim() !== replyBaselineAssistantRaw.trim()
+        const isFirstOutputForSession = committedOutputTokens === 0 && lastOutputCountedAt === 0
+        const isWaitedLongEnough = waitingForReply && awaitingStartedAt > 0 && now - awaitingStartedAt > 2500
+        if (changedThisReply && isFirstOutputForSession && isWaitedLongEnough) {
+          const latestAssistant = getLatestAssistantTextFromConversation() || assistantRaw.trim()
+          const sanitizedFirstReply = sanitizeReplyCandidate(latestAssistant)
+          if (sanitizedFirstReply) {
+            dbg('fallback-first-reply-full', {
+              textLen: sanitizedFirstReply.length,
+              sample: sanitizedFirstReply.slice(0, 60),
+            })
+            void countOutputDelta('conversation_fallback_first_reply', sanitizedFirstReply, () => {
+              outputCountedForCurrentReply = true
+              awaitingAssistantReply = false
+              replyBaselineAssistantRaw = assistantRaw
+              assistantFallbackLastSeenRaw = assistantRaw
+              assistantBaselineText = getAssistantText()
+              assistantBaselineList = collectAssistantTexts(strategy.findAssistantBlocks())
+              trustedAssistantBaselineText = assistantBaselineText
+              trustedAssistantBaselineList = assistantBaselineList.slice()
+              trustedReplyBaselineRaw = replyBaselineAssistantRaw
+              lastOutputCountedAt = Date.now()
+              publishPlatformState({ reason: 'conversation_fallback_first_reply', deltaLen: sanitizedFirstReply.length })
+            })
+            return
+          }
+        }
         return
       }
     }
     if (!delta) return
+    const normalizedDelta = normalizeFallbackDelta(delta, replyBaselineAssistantRaw, assistantRaw)
+    let sanitizedDelta = sanitizeReplyCandidate(normalizedDelta)
+    if (!sanitizedDelta && committedOutputTokens === 0) {
+      const latestAssistant = getLatestAssistantTextFromConversation() || assistantRaw.trim()
+      sanitizedDelta = sanitizeReplyCandidate(latestAssistant)
+    }
+    if (!sanitizedDelta) return
+    if (isSuspiciousFallbackDelta(sanitizedDelta, replyBaselineAssistantRaw, assistantRaw)) {
+      publishPlatformState({
+        reason: 'fallback_delta_too_large_skipped',
+        deltaLen: sanitizedDelta.length,
+        baselineLen: replyBaselineAssistantRaw.length,
+        assistantLen: assistantRaw.length,
+      })
+      return
+    }
     dbg('fallback-conversation-delta', { deltaLen: delta.length, sample: delta.slice(0, 60) })
-    const signature = `f:${replyStartAssistantCount}:${delta.length}:${hashText(delta)}`
-    if (countedOutputSignatures.has(signature)) return
-    countedOutputSignatures.add(signature)
-    outputCountedForCurrentReply = true
-    awaitingAssistantReply = false
-    replyBaselineAssistantRaw = assistantRaw
-    assistantFallbackLastSeenRaw = assistantRaw
-    assistantBaselineText = getAssistantText()
-    assistantBaselineList = collectAssistantTexts(strategy.findAssistantBlocks())
-    lastOutputCountedAt = Date.now()
-    publishPlatformState({ reason: 'conversation_fallback', deltaLen: delta.length })
-    countOutputTokens(delta)
+    void countOutputDelta('conversation_fallback', sanitizedDelta, () => {
+      outputCountedForCurrentReply = true
+      awaitingAssistantReply = false
+      replyBaselineAssistantRaw = assistantRaw
+      assistantFallbackLastSeenRaw = assistantRaw
+      assistantBaselineText = getAssistantText()
+      assistantBaselineList = collectAssistantTexts(strategy.findAssistantBlocks())
+      trustedAssistantBaselineText = assistantBaselineText
+      trustedAssistantBaselineList = assistantBaselineList.slice()
+      trustedReplyBaselineRaw = replyBaselineAssistantRaw
+      lastOutputCountedAt = Date.now()
+      publishPlatformState({ reason: 'conversation_fallback', deltaLen: delta.length })
+    })
   }
 
   function maybeSelfHealOutputStall() {
     if (!(platform === 'yiyan' || platform === 'moonshot')) return
     const now = Date.now()
-    if (now - lastSelfHealAttemptAt < 8000) return
-    if (!lastInputCommittedAt) return
-    if (committedOutputTokens > 0 && now - lastOutputCountedAt < 5000) return
-    if (now - lastInputCommittedAt < 12000) return
-    if (awaitingAssistantReply && awaitingStartedAt > 0 && now - awaitingStartedAt < 12000) return
+    if (!shouldAttemptOutputSelfHeal({
+      now,
+      lastSelfHealAttemptAt,
+      lastInputCommittedAt,
+      lastOutputCountedAt,
+      awaitingAssistantReply,
+      awaitingStartedAt,
+    })) return
 
     const latestAssistant = getLatestAssistantTextFromConversation()
     if (!latestAssistant) return
@@ -613,6 +830,75 @@ function main() {
     }
     lastSelfHealAttemptAt = now
     publishPlatformState({ reason: 'self_heal_output_stall', assistantLen: latestAssistant.length })
+  }
+
+  async function maybeForceCommitAssistantOnTimeout(currentAssistantText: string) {
+    if (outputCountInFlight) return
+    if (!awaitingAssistantReply || outputCountedForCurrentReply) return
+    let delta = ''
+    if (assistantBaselineText) {
+      delta = getAppendOnlyDelta(assistantBaselineText, currentAssistantText)
+      if (!delta && platform === 'doubao') {
+        delta = getTailWindowDelta(assistantBaselineText, currentAssistantText)
+      }
+    } else {
+      delta = currentAssistantText.trim()
+    }
+
+    if (!delta) {
+      const now = Date.now()
+      const awaitingMs = awaitingStartedAt > 0 ? now - awaitingStartedAt : 0
+      const stableMs = now - assistantLastChangedAt
+      if (shouldAllowAwaitingResetNoDelta({
+        awaitingMs,
+        stableMs,
+        consecutiveNoDeltaPolls: noDeltaPolls,
+      })) {
+        awaitingAssistantReply = false
+        outputCountedForCurrentReply = false
+        publishPlatformState({ reason: 'awaiting_timeout_reset_no_delta' })
+      }
+      return
+    }
+
+    const normalizedDelta = normalizeFallbackDelta(delta, assistantBaselineText, currentAssistantText)
+    let sanitizedDelta = sanitizeReplyCandidate(normalizedDelta)
+    if (!sanitizedDelta && committedOutputTokens === 0) {
+      const latestAssistant = getLatestAssistantTextFromConversation() || currentAssistantText.trim()
+      sanitizedDelta = sanitizeReplyCandidate(latestAssistant)
+    }
+    if (!sanitizedDelta) {
+      const now = Date.now()
+      const awaitingMs = awaitingStartedAt > 0 ? now - awaitingStartedAt : 0
+      const stableMs = now - assistantLastChangedAt
+      if (shouldAllowAwaitingResetNoDelta({
+        awaitingMs,
+        stableMs,
+        consecutiveNoDeltaPolls: noDeltaPolls,
+      })) {
+        awaitingAssistantReply = false
+        outputCountedForCurrentReply = false
+        publishPlatformState({ reason: 'awaiting_timeout_reset_no_delta' })
+      }
+      return
+    }
+
+    const ok = await countOutputDelta('awaiting_timeout_force', sanitizedDelta, () => {
+      outputCountedForCurrentReply = true
+      awaitingAssistantReply = false
+      assistantBaselineText = currentAssistantText
+      assistantBaselineList = collectAssistantTexts(strategy.findAssistantBlocks())
+      trustedAssistantBaselineText = assistantBaselineText
+      trustedAssistantBaselineList = assistantBaselineList.slice()
+      trustedReplyBaselineRaw = getReplyBaselineAssistantRaw()
+      lastOutputCountedAt = Date.now()
+      publishPlatformState({ reason: 'awaiting_timeout_force_counted', deltaLen: delta.length })
+    })
+    if (!ok) {
+      awaitingAssistantReply = false
+      outputCountedForCurrentReply = false
+      publishPlatformState({ reason: 'awaiting_timeout_force_failed' })
+    }
   }
 
   function getConversationFingerprint(): string {
@@ -681,12 +967,16 @@ function main() {
     if (!latest) return ''
     const baselineLatest = baselineList[baselineList.length - 1]?.trim() || ''
     if (!baselineLatest) return latest
+    return getAppendOnlyDelta(baselineLatest, latest)
+  }
+
+  function getChangedLatestAssistantText(baselineList: string[], currentList: string[]): string {
+    if (currentList.length === 0) return ''
+    const latest = currentList[currentList.length - 1]?.trim() || ''
+    if (!latest) return ''
+    const baselineLatest = baselineList[baselineList.length - 1]?.trim() || ''
+    if (!baselineLatest) return latest
     if (latest === baselineLatest) return ''
-    const overlap = longestCommonPrefixLen(baselineLatest, latest)
-    if (overlap > 0 && overlap < latest.length) {
-      return latest.slice(overlap).trim()
-    }
-    if (baselineLatest.includes(latest)) return ''
     return latest
   }
 
@@ -783,29 +1073,48 @@ function main() {
     return (candidates[0]?.textContent || '').trim()
   }
 
-  function longestCommonPrefixLen(a: string, b: string): number {
-    const len = Math.min(a.length, b.length)
-    let i = 0
-    while (i < len && a.charCodeAt(i) === b.charCodeAt(i)) i += 1
-    return i
-  }
-
-  async function countOutputTokens(text: string) {
-    if (!text) return
+  async function countOutputDelta(reason: string, text: string, onSuccess: () => void): Promise<boolean> {
+    if (!text) return false
+    if (outputCountInFlight) return false
+    const signature = createOutputSignature(getConversationKey(), text)
+    if (countedOutputSignatures.has(signature) || pendingOutputSignatures.has(signature)) return false
+    outputCountInFlight = true
+    pendingOutputSignatures.add(signature)
     dbg('count-output:start', { textLen: text.length, sample: text.slice(0, 40) })
-    const resp = await sendRequest({
-      type: 'count_tokens',
-      platform,
-      text,
-    })
-    if (resp?.type === 'token_count') {
-      const tokenCount = (resp.data as TokenCount).totalTokens
-      dbg('count-output:done', { tokenCount })
-      committedOutputTokens += tokenCount
-      await updateContextTokens()
-      await recordUsage({ outputTokens: tokenCount })
+    try {
+      const resp = await sendRequest({
+        type: 'count_tokens',
+        platform,
+        text,
+      })
+      pendingOutputSignatures.delete(signature)
+      if (resp?.type === 'token_count') {
+        const tokenCount = (resp.data as TokenCount).totalTokens
+        dbg('count-output:done', { tokenCount })
+        committedOutputTokens += tokenCount
+        countedOutputSignatures.add(signature)
+        bumpContextHistoryFromCommit(tokenCount, 1)
+        trace('output_committed', {
+          source: reason,
+          tokenCount,
+          textLen: text.length,
+        })
+        onSuccess()
+        await updateContextTokens()
+        await recordUsage({ outputTokens: tokenCount })
+        updateDisplay()
+        return true
+      }
+      publishPlatformState({
+        reason: 'output_count_error',
+        source: reason,
+        error: resp?.type === 'error' ? resp.message : 'Unknown error',
+      })
+      updateDisplay()
+      return false
+    } finally {
+      outputCountInFlight = false
     }
-    updateDisplay()
   }
 
   async function recordUsage(delta: { inputTokens?: number; outputTokens?: number }) {
@@ -902,12 +1211,103 @@ function main() {
     if (version !== contextVersion) return
     if (resp?.type === 'token_count') {
       const rawTokens = (resp.data as TokenCount).totalTokens
-      contextHistoryTokens = rawTokens
-      contextHistoryTurns = turnCount
-      lastContextFingerprint = getContextFingerprint()
+      const beforeTokens = contextHistoryTokens
+      const beforeTurns = contextHistoryTurns
+      const fingerprint = getContextFingerprint()
+      const merge = mergeContextHistorySample(
+        {
+          tokens: contextHistoryTokens,
+          turns: contextHistoryTurns,
+          fingerprint: lastContextFingerprint,
+        },
+        {
+          tokens: rawTokens,
+          turns: turnCount,
+          fingerprint,
+        }
+      )
+      if (merge.decision === 'accepted') {
+        shrinkStableCount = 0
+        lastShrinkSampleTokens = 0
+        shrinkReportFingerprint = ''
+        shrinkReportCount = 0
+        applyTrustedContextHistory(merge.state)
+        if (contextHistoryTokens !== beforeTokens || contextHistoryTurns !== beforeTurns) {
+          trace('context_accepted', {
+            sampledTokens: rawTokens,
+            sampledTurns: turnCount,
+            trustedTokens: contextHistoryTokens,
+            trustedTurns: contextHistoryTurns,
+          })
+        }
+      } else if (merge.decision === 'ignored_shrink') {
+        const sampledRatio = contextHistoryTokens > 0 ? rawTokens / contextHistoryTokens : 0
+        const risingSample = rawTokens >= Math.max(lastShrinkSampleTokens, Math.floor(contextHistoryTokens * 0.72))
+        if (risingSample) {
+          shrinkStableCount += 1
+          lastShrinkSampleTokens = rawTokens
+        } else {
+          shrinkStableCount = 0
+          lastShrinkSampleTokens = rawTokens
+        }
+
+        if (shrinkStableCount >= 3 && sampledRatio >= 0.82) {
+          applyTrustedContextHistory({
+            tokens: rawTokens,
+            turns: Math.max(turnCount, Math.min(contextHistoryTurns, turnCount + 2)),
+            fingerprint,
+          })
+          shrinkStableCount = 0
+          lastShrinkSampleTokens = 0
+          trace('context_recovered_from_shrink', {
+            sampledTokens: rawTokens,
+            sampledTurns: turnCount,
+            trustedTokens: contextHistoryTokens,
+            trustedTurns: contextHistoryTurns,
+          })
+        }
+
+        const now = Date.now()
+        if (fingerprint !== shrinkReportFingerprint) {
+          shrinkReportFingerprint = fingerprint
+          shrinkReportCount = 0
+        }
+        shrinkReportCount += 1
+        const shouldReport = (
+          shrinkReportCount === 1 ||
+          shrinkReportCount % 5 === 0 ||
+          now - shrinkReportLastAt > 15000
+        )
+        if (shouldReport) {
+          shrinkReportLastAt = now
+          publishPlatformState({
+            reason: 'context_shrink_ignored',
+            sampledTokens: rawTokens,
+            trustedTokens: contextHistoryTokens,
+            sampledTurns: turnCount,
+            trustedTurns: contextHistoryTurns,
+            sampledFingerprint: fingerprint,
+            trustedFingerprint: lastContextFingerprint,
+            shrinkCount: shrinkReportCount,
+          })
+          trace('context_ignored_shrink', {
+            sampledTokens: rawTokens,
+            sampledTurns: turnCount,
+            trustedTokens: contextHistoryTokens,
+            trustedTurns: contextHistoryTurns,
+            shrinkCount: shrinkReportCount,
+          })
+        }
+      }
       updateContextFromParts(currentInput.trim() ? currentInputTokenCount : 0)
     }
     updateDisplay()
+  }
+
+  function applyTrustedContextHistory(state: ContextHistoryState) {
+    contextHistoryTokens = state.tokens
+    contextHistoryTurns = state.turns
+    lastContextFingerprint = state.fingerprint
   }
 
   function updateContextFromParts(inputTokens = currentInputTokenCount) {
@@ -937,9 +1337,23 @@ function main() {
   }
 
   function applySessionState(session: SessionState) {
+    currentDayKey = session.dayKey || getLocalDayKey()
     currentSessionId = session.sessionId
     committedInputTokens = session.inputTokens
     committedOutputTokens = session.outputTokens
+    if (session.contextWindowTokens > contextWindowTokens) {
+      const restored = restoreContextHistoryFromWindow(
+        {
+          tokens: contextHistoryTokens,
+          turns: contextHistoryTurns,
+          fingerprint: lastContextFingerprint,
+        },
+        session.contextWindowTokens,
+        SYSTEM_PROMPT_BASE[platform]
+      )
+      applyTrustedContextHistory(restored)
+      updateContextFromParts()
+    }
     updateDisplay()
   }
 
@@ -952,11 +1366,36 @@ function main() {
     }
   }
 
+  async function promoteCurrentSession(conversationKey: string) {
+    if (!currentSessionId) return
+    const resp = await sendRequest({
+      type: 'promote_session',
+      platform,
+      sessionId: currentSessionId,
+      conversationKey,
+    })
+    if (resp?.type === 'session_id') {
+      conversationKeyLocked = conversationKey
+      lastConversationKey = conversationKey
+      applySessionState(resp.data.session)
+      publishPlatformState({ reason: 'session_promoted_to_resolved_key', conversationKey })
+    }
+  }
+
+  function maybeRollOverDailySession() {
+    const nextDayKey = getLocalDayKey()
+    if (nextDayKey === currentDayKey) return
+    currentDayKey = nextDayKey
+    publishPlatformState({ reason: 'daily_rollover' })
+    resetConversation(true)
+  }
+
   /** Reset counters for a new conversation */
-  function resetConversation() {
+  function resetConversation(force = false, startSession = true, refreshContext = true) {
     const convKey = getConversationKey()
-    if (convKey === lastConversationKey) return
+    if (!force && convKey === lastConversationKey) return
     lastConversationKey = convKey
+    currentSessionId = ''
     committedInputTokens = 0
     committedOutputTokens = 0
     lastInputCharCount = 0
@@ -964,7 +1403,10 @@ function main() {
     awaitingAssistantReply = false
     outputCountedForCurrentReply = false
     awaitingStartedAt = 0
+    noDeltaPolls = 0
+    outputCountInFlight = false
     countedOutputSignatures.clear()
+    pendingOutputSignatures.clear()
     recentInputCommitKeys.clear()
     platformEventLog.length = 0
     assistantBaselineText = getAssistantText()
@@ -974,19 +1416,32 @@ function main() {
       replyBaselineAssistantRaw = getReplyBaselineAssistantRaw()
       assistantFallbackLastSeenRaw = replyBaselineAssistantRaw
     }
+    trustedAssistantBaselineText = assistantBaselineText
+    trustedAssistantBaselineList = assistantBaselineList.slice()
+    trustedReplyBaselineRaw = replyBaselineAssistantRaw
+    stableIdleAssistantTicks = 0
+    lastIdleAssistantText = assistantBaselineText
     lastCommittedInputText = ''
+    recentCommittedInputs.length = 0
     lastOutputCountedAt = 0
     assistantLastSeenText = assistantBaselineText
     assistantLastChangedAt = Date.now()
     contextWindowTokens = SYSTEM_PROMPT_BASE[platform]
     contextHistoryTokens = 0
     contextHistoryTurns = 0
+    shrinkStableCount = 0
+    lastShrinkSampleTokens = 0
+    shrinkReportFingerprint = ''
+    shrinkReportCount = 0
+    shrinkReportLastAt = 0
+    emptyConversationResetCount = 0
+    lastContextFingerprint = ''
     contextVersion++
     lastConversationFingerprint = getConversationFingerprint()
-    console.log(`[AI Token Guard] New conversation: ${convKey}`)
     publishPlatformState({ reason: 'conversation_reset' })
     updateDisplay()
-    updateContextTokens()
+    if (refreshContext) updateContextTokens()
+    if (!startSession) return
     sendRequest({ type: 'start_session', platform, conversationKey: convKey }).then((resp) => {
       if (resp?.type === 'session_id' && getConversationKey() === convKey) {
         applySessionState(resp.data.session)
@@ -997,15 +1452,26 @@ function main() {
   function maybeResetDraftSessionOnEmptyConversation() {
     // Some platforms can start a brand-new topic without changing route.
     // If UI clearly returns to "no real user turn yet", force a fresh draft key.
-    if (!(platform === 'yiyan' || platform === 'moonshot' || platform === 'doubao')) return
+    if (!shouldCheckEmptyConversationReset(platform)) return
     if (awaitingAssistantReply) return
     if (!committedInputTokens && !committedOutputTokens) return
     if (Date.now() - lastForcedDraftResetAt < 5000) return
     if (domObserver.getCurrentInputText().trim()) return
-    if (hasConversationMessages()) return
+    if (hasConversationMessages()) {
+      emptyConversationResetCount = 0
+      return
+    }
+    emptyConversationResetCount += 1
+    if (emptyConversationResetCount < 3) return
+    if (hasResolvedSessionId(currentBaseConversationKey())) {
+      publishPlatformState({ reason: 'empty_reset_skipped_resolved_session' })
+      emptyConversationResetCount = 0
+      return
+    }
     draftConversationNonce += 1
     lastForcedDraftResetAt = Date.now()
     conversationKeyLocked = ''
+    emptyConversationResetCount = 0
     publishPlatformState({ reason: 'forced_draft_reset_on_empty' })
     resetConversation()
   }
@@ -1075,11 +1541,15 @@ function main() {
         awaitingAssistantReply = true
         outputCountedForCurrentReply = false
         awaitingStartedAt = Date.now()
-        assistantBaselineText = getAssistantText()
-        assistantBaselineList = collectAssistantTexts(strategy.findAssistantBlocks())
+        noDeltaPolls = 0
+        outputCountInFlight = false
+        assistantBaselineText = trustedAssistantBaselineText || getAssistantText()
+        assistantBaselineList = trustedAssistantBaselineList.length > 0
+          ? trustedAssistantBaselineList.slice()
+          : collectAssistantTexts(strategy.findAssistantBlocks())
         replyStartAssistantCount = assistantBaselineList.length
         {
-          replyBaselineAssistantRaw = getReplyBaselineAssistantRaw()
+          replyBaselineAssistantRaw = trustedReplyBaselineRaw || getReplyBaselineAssistantRaw()
           assistantFallbackLastSeenRaw = replyBaselineAssistantRaw
         }
         if (!replyBaselineAssistantRaw) {
@@ -1088,9 +1558,16 @@ function main() {
           replyBaselineAssistantRaw = ''
         }
         lastCommittedInputText = normalizedText
+        recentCommittedInputs.unshift(normalizedText)
+        if (recentCommittedInputs.length > 6) recentCommittedInputs.length = 6
         assistantLastSeenText = assistantBaselineText
         assistantLastChangedAt = Date.now()
+        bumpContextHistoryFromCommit(tokenCount, 1)
         publishPlatformState({ reason: 'input_committed', inputTokenCount: tokenCount })
+        trace('input_committed', {
+          tokenCount,
+          textLen: normalizedText.length,
+        })
         await updateContextTokens('')
         await recordUsage({ inputTokens: tokenCount })
       } else {
@@ -1123,9 +1600,15 @@ function main() {
     handleObservedInput(text)
   }, 300)
 
+  registerInterval(() => {
+    if (!extensionContextAlive) return
+    maybeRollOverDailySession()
+  }, 30000)
+
   // Poll for assistant replies every 1s
   registerInterval(() => {
     if (!extensionContextAlive) return
+    if (outputCountInFlight) return
     pollAssistantReply()
     maybeCountOutputByConversationFallback()
     maybeSelfHealOutputStall()
@@ -1138,12 +1621,15 @@ function main() {
     const currentRoute = `${window.location.pathname}${window.location.search}${window.location.hash}`
     if (currentRoute === prevRoute) return
     const previousKey = conversationKeyLocked
-    const wasDraft = previousKey.includes('::draft:')
+    const wasDraft = isDraftConversationKey(previousKey)
     const recentPromotionWindow = Date.now() - lastSubmittedAt < 90000
     const hasStartedSession = committedInputTokens > 0
+    const resolvedKey = currentBaseConversationKey()
     prevRoute = currentRoute
     if (wasDraft && hasStartedSession && recentPromotionWindow) {
-      // Keep draft session key when provider rewrites route right after first send.
+      if (hasResolvedSessionId(resolvedKey)) {
+        void promoteCurrentSession(resolvedKey)
+      }
       return
     }
     draftConversationNonce += 1
@@ -1172,9 +1658,10 @@ function main() {
 
   // Mount floating bar
   const tryMount = () => {
+    if (barMounted && document.getElementById('ai-token-guard-bar')) return
     const readyState = strategy.isReady()
     if (!readyState.ready) {
-      console.log(`[AI Token Guard] Strategy not ready on ${window.location.hostname}: ${readyState.missing.join(', ')}`)
+      dbg('strategy-not-ready', { host: window.location.hostname, missing: readyState.missing })
       setTimeout(tryMount, 800)
       return
     }
@@ -1185,7 +1672,7 @@ function main() {
       return
     }
 
-    console.log('[AI Token Guard] Mounting floating bar on', inputEl.tagName, 'strategy:', strategy.platform)
+    dbg('mount-floating-bar', { tagName: inputEl.tagName, strategy: strategy.platform })
     floatingBar.mount(inputEl as HTMLElement)
     barMounted = true
     assistantBaselineText = getAssistantText()
@@ -1196,11 +1683,21 @@ function main() {
       assistantFallbackLastSeenRaw = replyBaselineAssistantRaw
     }
     lastCommittedInputText = ''
+    recentCommittedInputs.length = 0
     assistantLastSeenText = assistantBaselineText
     assistantLastChangedAt = Date.now()
-    draftConversationNonce += 1
-    conversationKeyLocked = ''
-    resetConversation()
+    if (!hasMountedOnce) {
+      hasMountedOnce = true
+      draftConversationNonce += 1
+      conversationKeyLocked = ''
+      resetConversation()
+      updateContextTokens()
+      return
+    }
+    trustedAssistantBaselineText = assistantBaselineText
+    trustedAssistantBaselineList = assistantBaselineList.slice()
+    trustedReplyBaselineRaw = replyBaselineAssistantRaw
+    updateDisplay()
     updateContextTokens()
   }
   setTimeout(tryMount, 500)
