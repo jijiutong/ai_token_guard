@@ -71,7 +71,10 @@ function main() {
   const strategy = strategyCandidate
   const platform: PlatformName = strategy.platform
   currentPlatform = platform
-  const debugOutput = window.localStorage.getItem('ai-token-guard-debug') === '1'
+  const legacyDebugFlag = window.localStorage.getItem('ai-token-guard-debug')
+  const logLevel = window.localStorage.getItem('ai-token-guard-log-level') || (legacyDebugFlag === '1' ? 'debug' : legacyDebugFlag || 'off')
+  const debugOutput = logLevel === 'debug' || logLevel === 'trace'
+  const traceOutput = logLevel === 'trace'
   let lastPollDebugSignature = ''
 
   function dbg(...args: unknown[]) {
@@ -80,7 +83,7 @@ function main() {
   }
 
   function trace(type: string, data: Record<string, unknown> = {}) {
-    if (!debugOutput) return
+    if (!traceOutput) return
     const payload = {
       type,
       ts: Date.now(),
@@ -1077,7 +1080,12 @@ function main() {
     if (!text) return false
     if (outputCountInFlight) return false
     const signature = createOutputSignature(getConversationKey(), text)
-    if (countedOutputSignatures.has(signature) || pendingOutputSignatures.has(signature)) return false
+    if (countedOutputSignatures.has(signature)) {
+      onSuccess()
+      updateDisplay()
+      return true
+    }
+    if (pendingOutputSignatures.has(signature)) return false
     outputCountInFlight = true
     pendingOutputSignatures.add(signature)
     dbg('count-output:start', { textLen: text.length, sample: text.slice(0, 40) })
@@ -1087,7 +1095,6 @@ function main() {
         platform,
         text,
       })
-      pendingOutputSignatures.delete(signature)
       if (resp?.type === 'token_count') {
         const tokenCount = (resp.data as TokenCount).totalTokens
         dbg('count-output:done', { tokenCount })
@@ -1113,6 +1120,7 @@ function main() {
       updateDisplay()
       return false
     } finally {
+      pendingOutputSignatures.delete(signature)
       outputCountInFlight = false
     }
   }

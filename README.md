@@ -143,21 +143,35 @@ npm run build
 
 默认只保留基础日志：安装提示、运行时错误、WASM 重试警告、offscreen 初始化失败等。高频调试日志默认关闭。
 
+日志等级通过 `localStorage.ai-token-guard-log-level` 控制：
+
+- `off` 或不设置：只保留基础日志。
+- `debug`：输出简要平台调试日志，例如输入/输出抓取路径。
+- `trace`：输出完整 `[ATG-TRACE]` 实时追踪日志，仅深度排查时使用。
+
 如需临时排查某个平台，在对应 AI 网页控制台执行：
 
 ```js
-localStorage.setItem('ai-token-guard-debug', '1')
+localStorage.setItem('ai-token-guard-log-level', 'debug')
 location.reload()
 ```
 
-关闭调试日志：
+打开完整 trace：
 
 ```js
+localStorage.setItem('ai-token-guard-log-level', 'trace')
+location.reload()
+```
+
+关闭调试和 `[ATG-TRACE]`：
+
+```js
+localStorage.removeItem('ai-token-guard-log-level')
 localStorage.removeItem('ai-token-guard-debug')
 location.reload()
 ```
 
-调试模式会输出平台状态、输入/输出提交、上下文采样和输出抓取路径等信息。
+兼容旧开关：`localStorage.setItem('ai-token-guard-debug', '1')` 只会开启 `debug`，不会再输出 `[ATG-TRACE]`。
 
 ---
 
