@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Token Guard 隐私政策</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+        color: #17212b;
+        background: #f7fbff;
+      }
+
+      body {
+        margin: 0;
+        line-height: 1.7;
+      }
+
+      main {
+        box-sizing: border-box;
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 56px 24px 72px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 34px;
+        line-height: 1.2;
+      }
+
+      h2 {
+        margin: 34px 0 10px;
+        font-size: 21px;
+      }
+
+      p,
+      li {
+        font-size: 16px;
+        color: #405162;
+      }
+
+      .card {
+        margin-top: 26px;
+        padding: 28px;
+        border: 1px solid #dbe7ee;
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 18px 38px rgba(13, 59, 70, 0.08);
+      }
+
+      .meta {
+        color: #647484;
+      }
+
+      a {
+        color: #0b7f68;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>AI Token Guard 隐私政策</h1>
+      <p class="meta">最后更新：2026 年 6 月 4 日</p>
+
+      <section class="card">
+        <p>
+          AI Token Guard 是一个浏览器扩展，用于在支持的 AI 对话网站上进行本地
+          Token 统计和上下文占用估算。我们重视用户隐私，并尽量减少数据访问范围。
+        </p>
+
+        <h2>我们不收集个人数据</h2>
+        <p>
+          AI Token Guard 不收集、出售、共享或上传任何个人数据。扩展不会收集姓名、
+          邮箱、账号信息、支付信息、健康信息、位置、浏览历史或其他身份信息。
+        </p>
+
+        <h2>本地 Token 统计</h2>
+        <p>
+          扩展会在支持的 AI 对话网站中读取页面上可见的对话文本，用于在用户浏览器本地
+          估算 Token 使用量。Token 统计数据、阈值设置和浮动窗口位置仅通过
+          <code>chrome.storage.local</code> 保存在用户本地浏览器中。
+        </p>
+
+        <h2>不会上传对话内容</h2>
+        <p>
+          扩展不会将用户提示词、AI 回复内容、网页内容、浏览历史或 Token 统计数据发送到
+          任何外部服务器。
+        </p>
+
+        <h2>不使用远程代码</h2>
+        <p>
+          所有 JavaScript 和 WebAssembly 文件都随扩展一起打包。分词器 WebAssembly 文件
+          通过 <code>chrome.runtime.getURL</code> 从扩展包内部加载，扩展不会加载或执行
+          远程托管代码。
+        </p>
+
+        <h2>权限用途</h2>
+        <ul>
+          <li><strong>storage</strong>：用于在本地保存 Token 统计、阈值设置和浮动窗口位置。</li>
+          <li><strong>notifications</strong>：用于在 Token 使用量达到用户设置的阈值时显示本地提醒。</li>
+          <li><strong>offscreen</strong>：用于在 Manifest V3 环境下运行本地分词器 WebAssembly。</li>
+          <li><strong>主机权限</strong>：用于仅在支持的 AI 对话网站中注入 Token 计数浮层。</li>
+        </ul>
+
+        <h2>联系我们</h2>
+        <p>
+          如有隐私相关问题，请通过 GitHub 仓库联系：
+          <a href="https://github.com/jijiutong/ai_token_guard">github.com/jijiutong/ai_token_guard</a>
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

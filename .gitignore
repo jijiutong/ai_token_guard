@@ -54,3 +54,5 @@ Thumbs.db
 # Docs (generated / local only)
 # ============================
 docs/
+!docs/
+!docs/privacy-policy.html
