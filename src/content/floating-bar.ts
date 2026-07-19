@@ -1,3 +1,10 @@
+import {
+  DEFAULT_DISPLAY_MODE,
+  DISPLAY_MODE_KEY,
+  normalizeDisplayMode,
+  type FloatingDisplayMode,
+} from '../shared/display-mode'
+
 type SessionStats = {
   currentInputTokens: number
   inputTokens: number
@@ -26,9 +33,13 @@ type PetMood =
   | 'spin'
   | 'sit'
 
-const POS_KEY = 'atg:pet:position:v1'
+const PET_POS_KEY = 'atg:pet:position:v1'
+const COMPACT_POS_KEY = 'atg:bar:position:v1'
 const PET_W = 112
 const PET_H = 116
+const PET_LAYOUT_H = PET_H + 84
+const COMPACT_W = 340
+const COMPACT_H = 44
 const EDGE_MARGIN = 28
 
 const BLUE_PET_BEHAVIORS: Array<{ text: string; mood: PetMood }> = [
@@ -99,6 +110,8 @@ export class FloatingBar {
   private mouseMoveBound = false
   private latestState: FloatingState = { question: '', isThinking: false }
   private currentMood: PetMood = 'idle'
+  private displayMode: FloatingDisplayMode = DEFAULT_DISPLAY_MODE
+  private storageListenerBound = false
 
   mount(_anchorElement: HTMLElement) {
     this.destroy()
@@ -109,10 +122,10 @@ export class FloatingBar {
     this.bar.style.cssText = `
       position: fixed !important;
       z-index: 2147483647 !important;
-      left: calc(100vw - ${PET_W + EDGE_MARGIN}px) !important;
-      top: calc(100vh - ${PET_H + 84 + EDGE_MARGIN}px) !important;
-      width: ${PET_W}px !important;
-      height: ${PET_H + 84}px !important;
+      left: 0 !important;
+      top: 0 !important;
+      width: ${COMPACT_W}px !important;
+      height: ${COMPACT_H}px !important;
       pointer-events: auto !important;
       user-select: none !important;
       touch-action: none !important;
@@ -170,10 +183,9 @@ export class FloatingBar {
     this.bar.addEventListener('pointerdown', (e) => this.onDragStart(e))
     document.body.appendChild(this.bar)
 
-    this.restorePosition()
-    this.relayoutCloud()
-    this.bindMouseLife()
-    this.startBehaviorLoop()
+    this.applyDisplayMode(DEFAULT_DISPLAY_MODE, false)
+    this.bindStorageListener()
+    void this.restoreDisplayModeAndPosition()
   }
 
   update(charCount: number, sessionStats: SessionStats, state?: FloatingState) {
@@ -242,6 +254,10 @@ export class FloatingBar {
       window.clearTimeout(this.behaviorTimer)
       this.behaviorTimer = null
     }
+    if (this.storageListenerBound) {
+      chrome.storage.onChanged.removeListener(this.handleStorageChanged)
+      this.storageListenerBound = false
+    }
   }
 
   private injectStyles() {
@@ -306,6 +322,12 @@ export class FloatingBar {
       #ai-token-guard-bar, #ai-token-guard-bar * {
         box-sizing: border-box !important;
       }
+      #ai-token-guard-bar {
+        cursor: grab !important;
+      }
+      #ai-token-guard-bar:active {
+        cursor: grabbing !important;
+      }
       .atg-thought-bubble {
         position: absolute !important;
         left: 50% !important;
@@ -367,6 +389,66 @@ export class FloatingBar {
       .atg-pet-status-dot.thinking {
         background: #f59e0b !important;
         box-shadow: 0 0 0 2px rgba(245,158,11,.18), 0 3px 8px rgba(15,23,42,.18) !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-bluepet {
+        display: none !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-thought-bubble {
+        bottom: 0 !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        height: ${COMPACT_H}px !important;
+        padding: 0 42px 0 38px !important;
+        display: flex !important;
+        align-items: center !important;
+        border-radius: 13px !important;
+        border-color: rgba(15, 118, 110, .16) !important;
+        background: rgba(250, 253, 252, .96) !important;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, .12), inset 0 1px 0 rgba(255,255,255,.98) !important;
+        backdrop-filter: blur(16px) saturate(1.15) !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-thought-bubble::before {
+        content: '' !important;
+        position: absolute !important;
+        left: 24px !important;
+        top: 12px !important;
+        width: 1px !important;
+        height: 20px !important;
+        background: rgba(15, 118, 110, .14) !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-thought-text {
+        display: none !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-thought-stats {
+        margin: 0 !important;
+        color: #334155 !important;
+        font-size: 11px !important;
+        line-height: 1 !important;
+        font-weight: 750 !important;
+        letter-spacing: .01em !important;
+        font-variant-numeric: tabular-nums !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-thought-spinner {
+        right: 13px !important;
+        top: 14px !important;
+        width: 16px !important;
+        height: 16px !important;
+        border-color: rgba(15,118,110,.2) !important;
+        border-top-color: #0f766e !important;
+      }
+      #ai-token-guard-bar.atg-mode-compact .atg-pet-status-dot {
+        display: block !important;
+        left: 10px !important;
+        right: auto !important;
+        top: 17px !important;
+        bottom: auto !important;
+        width: 10px !important;
+        height: 10px !important;
+        border: 2px solid #ecfdf5 !important;
+        box-shadow: 0 0 0 2px rgba(16,185,129,.12) !important;
       }
       .atg-bluepet {
         position: absolute !important;
@@ -616,6 +698,77 @@ export class FloatingBar {
     document.head.appendChild(style)
   }
 
+  private bindStorageListener() {
+    if (this.storageListenerBound) return
+    chrome.storage.onChanged.addListener(this.handleStorageChanged)
+    this.storageListenerBound = true
+  }
+
+  private handleStorageChanged = (
+    changes: Record<string, chrome.storage.StorageChange>,
+    areaName: string
+  ) => {
+    if (areaName !== 'local' || !changes[DISPLAY_MODE_KEY]) return
+    const mode = normalizeDisplayMode(changes[DISPLAY_MODE_KEY].newValue)
+    this.applyDisplayMode(mode)
+  }
+
+  private async restoreDisplayModeAndPosition() {
+    try {
+      const result = await chrome.storage.local.get(DISPLAY_MODE_KEY)
+      if (!this.bar) return
+      this.applyDisplayMode(normalizeDisplayMode(result[DISPLAY_MODE_KEY]), false)
+      await this.restorePosition()
+    } catch {
+      // Keep the compact default when storage is unavailable.
+    }
+  }
+
+  private applyDisplayMode(mode: FloatingDisplayMode, restorePosition = true) {
+    if (!this.bar) return
+    this.displayMode = mode
+    const compact = mode === 'compact'
+    const { width, height } = this.getLayoutSize()
+
+    this.bar.classList.toggle('atg-mode-compact', compact)
+    this.bar.classList.toggle('atg-mode-pet', !compact)
+    this.bar.style.setProperty('width', `${width}px`, 'important')
+    this.bar.style.setProperty('height', `${height}px`, 'important')
+
+    if (compact) {
+      this.stopBehaviorLoop()
+      this.unbindMouseLife()
+    } else {
+      this.bindMouseLife()
+      this.startBehaviorLoop()
+    }
+
+    this.applyPosition(this.getDefaultPosition())
+    this.relayoutCloud()
+    if (restorePosition) void this.restorePosition()
+  }
+
+  private getLayoutSize() {
+    return this.displayMode === 'compact'
+      ? {
+          width: Math.min(COMPACT_W, Math.max(220, window.innerWidth - EDGE_MARGIN * 2)),
+          height: COMPACT_H,
+        }
+      : { width: PET_W, height: PET_LAYOUT_H }
+  }
+
+  private getDefaultPosition(): Position {
+    const { width, height } = this.getLayoutSize()
+    return {
+      x: Math.max(EDGE_MARGIN, window.innerWidth - width - EDGE_MARGIN),
+      y: Math.max(EDGE_MARGIN, window.innerHeight - height - EDGE_MARGIN),
+    }
+  }
+
+  private getPositionKey() {
+    return this.displayMode === 'compact' ? COMPACT_POS_KEY : PET_POS_KEY
+  }
+
   private onDragStart(e: PointerEvent) {
     if (!this.bar) return
     const rect = this.bar.getBoundingClientRect()
@@ -647,8 +800,9 @@ export class FloatingBar {
 
   private applyPosition(pos: Position) {
     if (!this.bar) return
-    const maxX = window.innerWidth - PET_W - EDGE_MARGIN
-    const maxY = window.innerHeight - PET_H - 84 - EDGE_MARGIN
+    const { width, height } = this.getLayoutSize()
+    const maxX = Math.max(EDGE_MARGIN, window.innerWidth - width - EDGE_MARGIN)
+    const maxY = Math.max(EDGE_MARGIN, window.innerHeight - height - EDGE_MARGIN)
     const x = Math.max(EDGE_MARGIN, Math.min(pos.x, maxX))
     const y = Math.max(EDGE_MARGIN, Math.min(pos.y, maxY))
     this.bar.style.left = `${Math.round(x)}px`
@@ -658,8 +812,9 @@ export class FloatingBar {
 
   private async restorePosition() {
     try {
-      const result = await chrome.storage.local.get(POS_KEY)
-      const pos = result[POS_KEY] as Position | undefined
+      const positionKey = this.getPositionKey()
+      const result = await chrome.storage.local.get(positionKey)
+      const pos = result[positionKey] as Position | undefined
       if (!pos) return
       this.applyPosition(pos)
     } catch {
@@ -669,6 +824,11 @@ export class FloatingBar {
 
   private relayoutCloud() {
     if (!this.bar || !this.thoughtBubbleEl) return
+    if (this.displayMode === 'compact') {
+      this.thoughtBubbleEl.style.setProperty('left', '0px', 'important')
+      this.thoughtBubbleEl.style.setProperty('transform', 'none', 'important')
+      return
+    }
     const barRect = this.bar.getBoundingClientRect()
     const bubbleRect = this.thoughtBubbleEl.getBoundingClientRect()
     const margin = 10
@@ -684,6 +844,12 @@ export class FloatingBar {
     if (this.mouseMoveBound) return
     window.addEventListener('mousemove', this.handleMouseMove)
     this.mouseMoveBound = true
+  }
+
+  private unbindMouseLife() {
+    if (!this.mouseMoveBound) return
+    window.removeEventListener('mousemove', this.handleMouseMove)
+    this.mouseMoveBound = false
   }
 
   private handleMouseMove = (e: MouseEvent) => {
@@ -708,6 +874,12 @@ export class FloatingBar {
     this.behaviorTimer = window.setTimeout(tick, 2200)
   }
 
+  private stopBehaviorLoop() {
+    if (!this.behaviorTimer) return
+    window.clearTimeout(this.behaviorTimer)
+    this.behaviorTimer = null
+  }
+
   private applyBehavior(text: string, mood: PetMood) {
     if (!this.latestState.question && this.thoughtTextEl) this.thoughtTextEl.textContent = text
     this.setMood(mood)
@@ -722,7 +894,7 @@ export class FloatingBar {
   }
 
   private savePosition(pos: Position) {
-    chrome.storage.local.set({ [POS_KEY]: pos }).catch(() => {
+    chrome.storage.local.set({ [this.getPositionKey()]: pos }).catch(() => {
       // ignore storage failures
     })
   }
