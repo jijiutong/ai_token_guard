@@ -20,7 +20,7 @@
 - **简洁预警设置** — 支持总览阈值与平台阈值预警
 - **多会话隔离** — 按真实会话 ID 隔离计数，当天切换历史会话会恢复统计
 - **新话题识别** — 真正新开的空白会话显示输入 0 / 输出 0 / 会话 0
-- **桌面宠物浮层** — 右下角可拖拽宠物 + 气泡信息展示
+- **双模式页面浮层** — 默认简洁状态条，也可切换为可拖拽桌面宠物
 
 ### 🇺🇸 English
 
@@ -31,7 +31,7 @@
 - **Simple quota alerts** — Supports global and per-platform token threshold alerts
 - **Per-conversation isolation** — Counters are keyed by real conversation IDs and restored when switching history today
 - **New-topic detection** — A truly blank new topic starts from input 0 / output 0 / session 0
-- **Desktop pet overlay** — Draggable pet and bubble status panel
+- **Two overlay modes** — A compact status bar by default, with an optional draggable desktop pet
 
 ---
 
@@ -104,10 +104,10 @@ English summary:
 ┌──────────────────────────────────────┐
 │  输入 42 · 输出 180 · 会话 222 · 上下文≈ 3,891            │
 └──────────────────────────────────────┘
-          宠物浮层 · Pet overlay (bottom right, draggable)
+       简洁状态条（默认）/ 桌面宠物（可选，支持拖拽）
 ```
 
-Popup 页包含「统计」和「设置」两个标签页。  
+Popup 页包含「统计」和「设置」两个标签页；可在「设置 → 页面浮层」切换简洁状态条和桌面宠物。
 The popup has two tabs: **Stats** and **Settings**.
 
 ---
